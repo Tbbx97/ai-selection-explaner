@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7ff">
+    <title>AI Selection Explainer — Cài đặt</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="dashboard">
+      <header class="privacy-banner">
+        <span class="lock-icon" aria-hidden="true">🔒</span>
+        <p><strong>Khóa API được lưu trên máy tính của bạn.</strong> Khi bạn yêu cầu giải thích, khóa và đoạn văn bản sẽ được gửi trực tiếp đến Google hoặc OpenAI (nhà cung cấp bạn chọn) để xử lý — không gửi đến máy chủ nào khác.</p>
+      </header>
+
+      <section class="welcome">
+        <span class="eyebrow">AI SELECTION EXPLAINER</span>
+        <h1>Chào bạn! Cùng thiết lập trợ lý AI nhé 👋</h1>
+        <p>Chỉ cần dán chìa khóa một lần. Sau đó, bôi đen đoạn văn bản trên trang web để được giải thích thật dễ hiểu.</p>
+      </section>
+
+      <div class="columns">
+        <section class="card setup-card" aria-labelledby="keys-title">
+          <div class="card-heading">
+            <span class="step-number">1</span>
+            <div>
+              <h2 id="keys-title">Cài chìa khóa AI</h2>
+              <p>Bạn có thể dùng Gemini, OpenAI hoặc cả hai.</p>
+            </div>
+          </div>
+
+          <form id="settings-form">
+            <label for="gemini-key">Google Gemini <span class="recommended">Gợi ý · ưu tiên dùng</span></label>
+            <div class="input-wrap">
+              <input id="gemini-key" name="gemini-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Dán chìa khóa Gemini vào đây">
+              <span id="gemini-state" class="saved-state" aria-live="polite"></span>
+            </div>
+            <p class="field-help">Lấy key miễn phí theo hướng dẫn bên phải. Để trống nếu đã lưu và không muốn thay đổi.</p>
+            <button id="remove-gemini" class="remove-key" type="button" hidden>Xóa key Gemini đã lưu</button>
+
+            <label for="openai-key">OpenAI <span class="optional">Tùy chọn</span></label>
+            <div class="input-wrap">
+              <input id="openai-key" name="openai-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Dán chìa khóa OpenAI vào đây">
+              <span id="openai-state" class="saved-state" aria-live="polite"></span>
+            </div>
+            <p class="field-help">Nếu có cả hai key, extension sẽ ưu tiên Gemini. Để trống nếu không dùng OpenAI.</p>
+            <button id="remove-openai" class="remove-key" type="button" hidden>Xóa key OpenAI đã lưu</button>
+
+            <button class="save-button" type="submit">
+              <span aria-hidden="true">✓</span> Lưu cấu hình
+            </button>
+            <p id="status" class="status" role="status" aria-live="polite"></p>
+          </form>
+
+          <div class="privacy-tip">
+            <span aria-hidden="true">💡</span>
+            <p>Key đã lưu sẽ được ẩn bằng <strong>••••••••</strong>. Muốn xóa key, hãy bấm nút <strong>Xóa key</strong> tương ứng.</p>
+          </div>
+        </section>
+
+        <section class="card guide-card" aria-labelledby="guide-title">
+          <div class="card-heading">
+            <span class="guide-icon" aria-hidden="true">☝️</span>
+            <div>
+              <span class="guide-label">CẨM NANG 1 PHÚT</span>
+              <h2 id="guide-title">Lấy key Gemini miễn phí</h2>
+            </div>
+          </div>
+
+          <a class="open-studio" href="https://google.com" target="_blank" rel="noopener noreferrer">
+            <span class="google-mark" aria-hidden="true">G</span>
+            <span><strong>Mở Google</strong><small>Đăng nhập tài khoản Google/Gmail của bạn</small></span>
+            <span class="external-icon" aria-hidden="true">↗</span>
+          </a>
+
+          <ol class="steps">
+            <li class="guide-step">
+              <span class="step-icon" aria-hidden="true">👆</span>
+              <div><strong>Bước 1: Bấm vào link Google</strong><p>Google sẽ mở trong tab mới.</p></div>
+            </li>
+            <li class="guide-step">
+              <span class="step-icon" aria-hidden="true">👆</span>
+              <div><strong>Bước 2: Đăng nhập Gmail</strong><p>Dùng tài khoản Google/Gmail bất kỳ. Nếu đã đăng nhập sẵn, chuyển sang bước tiếp theo.</p></div>
+            </li>
+            <li class="guide-step">
+              <span class="step-icon" aria-hidden="true">👆</span>
+              <div>
+                <strong>Bước 3: Tạo và sao chép API Key</strong>
+                <p>Mở Google AI Studio, bấm “Get API key” hoặc “Create API key”, rồi sao chép chuỗi key.</p>
+                <a class="open-studio" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">
+                  <span class="google-mark" aria-hidden="true">G</span>
+                  <span><strong>Mở Google AI Studio</strong><small>Trang tạo Gemini API Key</small></span>
+                  <span class="external-icon" aria-hidden="true">↗</span>
+                </a>
+                <p>Dán key vào ô Gemini bên trái và bấm “Lưu cấu hình”.</p>
+              </div>
+            </li>
+          </ol>
+
+          <p class="guide-note"><strong>Lưu ý:</strong> Google có thể yêu cầu thiết lập tài khoản thanh toán hoặc áp dụng giới hạn sử dụng. Hãy xem thông tin hiện trên Google AI Studio trước khi sử dụng.</p>
+          <a class="openai-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Cần key OpenAI? Tạo tại platform.openai.com ↗</a>
+        </section>
+      </div>
+
+      <footer class="footer-note">Sau khi lưu key: mở một trang web, bôi đen đoạn văn bản và bấm nút ✨ để bắt đầu.</footer>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
