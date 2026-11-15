@@ -2,12 +2,23 @@ const MAX_SELECTION_LENGTH = 20000;
 const RESPONSE_TIMEOUT_MS = 30000;
 const STREAM_IDLE_TIMEOUT_MS = 20000;
 const STREAM_MAX_DURATION_MS = 60000;
+const SYSTEM_PROMPT = [
+  "Bạn là một trợ lý giải thích ngôn ngữ chuyên nghiệp. Hãy giải thích đoạn văn bản sau một cách ngắn gọn, dễ hiểu nhất, sử dụng từ ngữ bình dân cho người phổ thông.",
+  "Trước khi trả về nội dung giải thích, ở ngay dòng ĐẦU TIÊN của câu trả lời, bạn bắt buộc phải trả về một cờ hiệu cấu trúc chính xác là [CONTEXT:LEARNING] nếu đoạn văn bản bôi đen là tài liệu học tập, từ vựng, tiếng nước ngoài, phiên âm. Ngược lại, nếu là văn bản thông thường, hãy trả về [CONTEXT:GENERAL]. Sau dòng đầu tiên này, hãy xuống dòng và bắt đầu viết nội dung giải thích như bình thường."
+].join("\n\n");
 const GEMINI_MODELS = [
   "gemini-3.1-flash-lite",
   "gemini-3.6-flash",
   "gemini-3.8-flash"
 ];
 const activeRequests = new Map();
+
+class ClientDisconnectedError extends Error {
+  constructor() {
+    super("The page disconnected while the explanation was streaming.");
+    this.name = "ClientDisconnectedError";
+  }
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id;
@@ -98,17 +109,21 @@ async function streamExplanation(tabId, requestId, text) {
     const apiKey = settings[`${provider}ApiKey`];
 
     if (typeof apiKey !== "string" || !apiKey.trim()) {
-      await sendToTab(tabId, { type: "EXPLANATION_SETUP_REQUIRED", requestId });
+      await sendToTabOrAbort(
+        tabId,
+        { type: "EXPLANATION_SETUP_REQUIRED", requestId },
+        controller
+      );
       return;
     }
 
     const response = await withTimeout(
       provider === "gemini"
-        ? fetchGeminiWithFallback(apiKey.trim(), text, controller.signal, tabId, requestId)
+        ? fetchGeminiWithFallback(apiKey.trim(), text, controller, tabId, requestId)
         : fetchProvider(provider, apiKey.trim(), text, controller.signal),
       RESPONSE_TIMEOUT_MS,
       controller,
-      "AI không phản hồi trong 45 giây. Hãy thử lại hoặc kiểm tra kết nối mạng và API key."
+      "AI không phản hồi trong 30 giây. Hãy thử lại hoặc kiểm tra kết nối mạng và API key."
     );
     if (!response.ok) {
       const errorText = await response.text();
@@ -118,11 +133,11 @@ async function streamExplanation(tabId, requestId, text) {
       throw new Error("The API returned no response stream. Try again.");
     }
 
-    await sendToTab(tabId, {
+    await sendToTabOrAbort(tabId, {
       type: "EXPLANATION_STATUS",
       requestId,
       status: "Đã kết nối. AI đang chuẩn bị câu trả lời…"
-    });
+    }, controller);
 
     // Read each network chunk as it arrives, decode UTF-8 safely, and split the
     // SSE events independently of network chunk boundaries before forwarding text.
@@ -166,7 +181,8 @@ async function streamExplanation(tabId, requestId, text) {
           parsedEvent,
           !receivedText,
           tabId,
-          requestId
+          requestId,
+          controller
         );
         if (result.text) {
           receivedText = true;
@@ -189,7 +205,8 @@ async function streamExplanation(tabId, requestId, text) {
             parsedEvent,
             !receivedText,
             tabId,
-            requestId
+            requestId,
+            controller
           );
           if (result.text) {
             receivedText = true;
@@ -210,9 +227,12 @@ async function streamExplanation(tabId, requestId, text) {
       );
     }
     if (!controller.signal.aborted) {
-      await sendToTab(tabId, { type: "EXPLANATION_DONE", requestId });
+      await sendToTabOrAbort(tabId, { type: "EXPLANATION_DONE", requestId }, controller);
     }
   } catch (error) {
+    if (error instanceof ClientDisconnectedError) {
+      return;
+    }
     if (!controller.signal.aborted || error?.name === "TimeoutError") {
       const message = error instanceof Error ? error.message : "The explanation request failed.";
       await sendToTab(tabId, { type: "EXPLANATION_ERROR", requestId, error: message });
@@ -224,7 +244,7 @@ async function streamExplanation(tabId, requestId, text) {
   }
 }
 
-async function processStreamEvent(provider, parsedEvent, includeCompletedText, tabId, requestId) {
+async function processStreamEvent(provider, parsedEvent, includeCompletedText, tabId, requestId, controller) {
   const result = extractText(
     provider,
     parsedEvent.data,
@@ -236,18 +256,18 @@ async function processStreamEvent(provider, parsedEvent, includeCompletedText, t
     throw new Error(result.error);
   }
   if (result.status) {
-    await sendToTab(tabId, {
+    await sendToTabOrAbort(tabId, {
       type: "EXPLANATION_STATUS",
       requestId,
       status: result.status
-    });
+    }, controller);
   }
   if (result.text) {
-    await sendToTab(tabId, {
+    await sendToTabOrAbort(tabId, {
       type: "EXPLANATION_CHUNK",
       requestId,
       chunk: result.text
-    });
+    }, controller);
   }
 
   return result;
@@ -279,9 +299,6 @@ async function withTimeout(promise, timeoutMs, controller, errorMessage) {
 }
 
 async function fetchProvider(provider, apiKey, text, signal) {
-  const systemPrompt =
-    "Bạn là một trợ lý giải thích ngôn ngữ chuyên nghiệp. Hãy giải thích đoạn văn bản sau một cách ngắn gọn, dễ hiểu nhất, sử dụng từ ngữ bình dân cho người phổ thông:";
-
   if (provider === "gemini") {
     return fetchGeminiModel(apiKey, text, "gemini-3.8-flash", signal);
   }
@@ -296,7 +313,7 @@ async function fetchProvider(provider, apiKey, text, signal) {
       model: "gpt-4o-mini",
       stream: true,
       messages: [
-        { role: "system", content: systemPrompt },
+        { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
           content: text
@@ -307,29 +324,26 @@ async function fetchProvider(provider, apiKey, text, signal) {
   });
 }
 
-async function fetchGeminiWithFallback(apiKey, text, signal, tabId, requestId) {
+async function fetchGeminiWithFallback(apiKey, text, controller, tabId, requestId) {
   for (let index = 0; index < GEMINI_MODELS.length; index += 1) {
     const model = GEMINI_MODELS[index];
-    const response = await fetchGeminiModel(apiKey, text, model, signal);
+    const response = await fetchGeminiModel(apiKey, text, model, controller.signal);
 
     if (response.status !== 503 || index === GEMINI_MODELS.length - 1) {
       return response;
     }
 
-    await sendToTab(tabId, {
+    await sendToTabOrAbort(tabId, {
       type: "EXPLANATION_STATUS",
       requestId,
       status: `${model} đang quá tải. Đang thử ${GEMINI_MODELS[index + 1]}…`
-    });
+    }, controller);
   }
 
   throw new Error("Gemini hiện không khả dụng. Hãy thử lại sau.");
 }
 
 async function fetchGeminiModel(apiKey, text, model, signal) {
-  const systemPrompt =
-    "Bạn là một trợ lý giải thích ngôn ngữ chuyên nghiệp. Hãy giải thích đoạn văn bản sau một cách ngắn gọn, dễ hiểu nhất, sử dụng từ ngữ bình dân cho người phổ thông:";
-
   return fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
@@ -340,7 +354,7 @@ async function fetchGeminiModel(apiKey, text, model, signal) {
       },
       body: JSON.stringify({
         systemInstruction: {
-          parts: [{ text: systemPrompt }]
+          parts: [{ text: SYSTEM_PROMPT }]
         },
         contents: [
           {
@@ -500,7 +514,18 @@ function getApiError(status, body) {
 async function sendToTab(tabId, message) {
   try {
     await chrome.tabs.sendMessage(tabId, message);
+    return true;
   } catch {
-    // The tab may have navigated or closed while the stream was in progress.
+    return false;
   }
+}
+
+async function sendToTabOrAbort(tabId, message, controller) {
+  if (await sendToTab(tabId, message)) {
+    return;
+  }
+
+  controller.abort();
+  console.debug("Content script disconnected; aborting the active explanation stream.");
+  throw new ClientDisconnectedError();
 }
