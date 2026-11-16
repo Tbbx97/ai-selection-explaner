@@ -33,6 +33,28 @@
   launcher.hidden = true;
   shadow.append(launcher);
 
+  const imageActions = document.createElement("div");
+  imageActions.className = "aie-image-actions";
+  imageActions.hidden = true;
+  const explainImageButton = document.createElement("button");
+  explainImageButton.className = "aie-image-action-button";
+  explainImageButton.type = "button";
+  explainImageButton.textContent = "✨ Giải thích ảnh";
+  imageActions.append(explainImageButton);
+  shadow.append(imageActions);
+
+  const cropOverlay = document.createElement("div");
+  cropOverlay.className = "aie-crop-overlay";
+  cropOverlay.hidden = true;
+  cropOverlay.tabIndex = 0;
+  cropOverlay.setAttribute("role", "application");
+  cropOverlay.setAttribute("aria-label", "Drag to select an area to explain. Press Escape to cancel.");
+  const cropSelection = document.createElement("div");
+  cropSelection.className = "aie-crop-selection";
+  cropSelection.hidden = true;
+  cropOverlay.append(cropSelection);
+  shadow.append(cropOverlay);
+
   const panel = document.createElement("section");
   panel.className = "aie-panel";
   panel.setAttribute("role", "dialog");
@@ -82,11 +104,11 @@
   setupNotice.className = "aie-setup-notice";
   setupNotice.hidden = true;
   const setupText = document.createElement("p");
-  setupText.textContent = "Bạn chưa cài đặt Chìa khóa AI.";
+  setupText.textContent = "No AI API key is configured.";
   const setupLink = document.createElement("button");
   setupLink.className = "aie-setup-link";
   setupLink.type = "button";
-  setupLink.textContent = "Bấm vào đây để xem hướng dẫn lấy Key miễn phí trong 1 phút";
+  setupLink.textContent = "Click here for the 1-minute guide to getting a free API key";
   setupNotice.append(setupText, setupLink);
 
   const actions = document.createElement("footer");
@@ -99,17 +121,17 @@
   const retryButton = document.createElement("button");
   retryButton.className = "aie-action-button";
   retryButton.type = "button";
-  retryButton.textContent = "🔄 Thử lại";
+  retryButton.textContent = "🔄 Retry";
   const speakButton = document.createElement("button");
   speakButton.className = "aie-action-button aie-speak-button";
   speakButton.type = "button";
-  speakButton.textContent = "🔊 Đọc lên";
-  speakButton.setAttribute("aria-label", "Đọc nội dung giải thích");
+  speakButton.textContent = "🔊 Read aloud";
+  speakButton.setAttribute("aria-label", "Read the explanation aloud");
   speakButton.hidden = true;
   const dismissButton = document.createElement("button");
   dismissButton.className = "aie-action-button aie-action-dismiss";
   dismissButton.type = "button";
-  dismissButton.textContent = "❌ Đóng";
+  dismissButton.textContent = "❌ Close";
   const actionFeedback = document.createElement("span");
   actionFeedback.className = "aie-action-feedback";
   actionFeedback.setAttribute("aria-live", "polite");
@@ -128,6 +150,11 @@
   let contextSkipLineFeed = false;
   let activeUtterance = null;
   let copyFeedbackTimer;
+  let activeImage = null;
+  let hideImageActionsTimer;
+  let cropStart = null;
+  let cropRectangle = null;
+  let lastRequest = null;
   let pointer = { x: 0, y: 0 };
 
   document.addEventListener("pointermove", (event) => {
@@ -152,12 +179,80 @@
     }, 0);
   }, true);
 
+  document.addEventListener("pointerover", (event) => {
+    const target = event.target;
+    if (target?.tagName !== "IMG" || host.contains(target)) {
+      return;
+    }
+    showImageActions(target);
+  }, true);
+
+  document.addEventListener("pointerout", (event) => {
+    if (event.target === activeImage && event.relatedTarget !== activeImage) {
+      scheduleHideImageActions();
+    }
+  }, true);
+
+  imageActions.addEventListener("pointerenter", () => {
+    window.clearTimeout(hideImageActionsTimer);
+    imageActions.classList.remove("is-hiding");
+  });
+  imageActions.addEventListener("pointerleave", scheduleHideImageActions);
+  explainImageButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const imageUrl = activeImage?.currentSrc || activeImage?.src;
+    if (imageUrl) {
+      const source = imageUrl.startsWith("data:image/")
+        ? { imageDataUrl: imageUrl }
+        : { imageUrl };
+      startImageExplanation(source, getImageAnchor(activeImage));
+    }
+  });
+  cropOverlay.addEventListener("mousedown", (event) => {
+    if (event.button !== 0 || event.target !== cropOverlay) {
+      return;
+    }
+    event.preventDefault();
+    cropOverlay.classList.add("is-selecting");
+    cropStart = { x: event.clientX, y: event.clientY };
+    cropRectangle = { left: event.clientX, top: event.clientY, width: 0, height: 0 };
+    updateCropSelection();
+  });
+  cropOverlay.addEventListener("mousemove", (event) => {
+    if (!cropStart) {
+      return;
+    }
+    cropRectangle = getCropRectangle(cropStart, { x: event.clientX, y: event.clientY });
+    updateCropSelection();
+  });
+  cropOverlay.addEventListener("mouseup", (event) => {
+    if (!cropStart) {
+      return;
+    }
+    cropRectangle = getCropRectangle(cropStart, { x: event.clientX, y: event.clientY });
+    const completedRectangle = cropRectangle;
+    cropStart = null;
+    cropRectangle = null;
+    cropSelection.hidden = true;
+    cropOverlay.classList.remove("is-selecting");
+    cropOverlay.hidden = true;
+    if (completedRectangle.width >= 8 && completedRectangle.height >= 8) {
+      void captureAndExplainCrop(completedRectangle, { x: event.clientX, y: event.clientY });
+    }
+  });
+  cropOverlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      cancelCropMode();
+    }
+  });
+
   launcher.addEventListener("click", () => {
     void startExplanation();
   });
 
   retryButton.addEventListener("click", () => {
-    void startExplanation();
+    retryLastExplanation();
   });
 
   copyButton.addEventListener("click", async () => {
@@ -168,9 +263,9 @@
 
     try {
       await copyText(text);
-      setCopyFeedback("✓ Đã copy!", false);
+      setCopyFeedback("✓ Copied!", false);
     } catch {
-      setCopyFeedback("Không thể copy. Hãy thử lại.", true);
+      setCopyFeedback("Could not copy. Please try again.", true);
     }
   });
 
@@ -179,8 +274,8 @@
       stopSpeech();
       return;
     }
-    if (isLearningContext && isStreamComplete) {
-      speakText(getPlainResponseText(), "vi-VN");
+    if (isLearningContext && isStreamComplete && hasSpeakableLearningLine()) {
+      speakText(getPlainResponseText(), getBrowserSpeechLanguage());
     }
   });
 
@@ -188,6 +283,44 @@
   dismissButton.addEventListener("click", closePanel);
 
   async function startExplanation() {
+    const text = selectedText;
+    lastRequest = { type: "text", text };
+    const nextRequestId = createRequestId();
+    prepareExplanationRequest(
+      nextRequestId,
+      text,
+      "Connecting to the AI provider…",
+      { x: pointer.x + 10, y: pointer.y + 10 }
+    );
+
+    try {
+      const providerStatus = await chrome.runtime.sendMessage({ type: "GET_PROVIDER_STATUS" });
+      if (requestId !== nextRequestId) {
+        return;
+      }
+      if (!providerStatus?.ok) {
+        showError(nextRequestId, providerStatus?.error || "Could not check your saved AI key.");
+        return;
+      }
+      if (!providerStatus.hasKey) {
+        showSetupNotice();
+        return;
+      }
+
+      const result = await chrome.runtime.sendMessage({
+        type: "EXPLAIN_SELECTION",
+        requestId: nextRequestId,
+        text
+      });
+      if (!result?.ok) {
+        showError(nextRequestId, result?.error || "Could not start the explanation request.");
+      }
+    } catch {
+      showError(nextRequestId, "Could not contact the extension service worker. Reload the extension and try again.");
+    }
+  }
+
+  function prepareExplanationRequest(nextRequestId, previewText, initialStatus, anchor) {
     stopSpeech();
     isLearningContext = false;
     isStreamComplete = false;
@@ -195,15 +328,17 @@
     contextPrefixBuffer = "";
     contextHeaderPending = false;
     contextSkipLineFeed = false;
+    imageActions.hidden = true;
+    cropOverlay.hidden = true;
     launcher.hidden = true;
-    selectionPreview.textContent = selectedText.slice(0, 240);
-    if (selectedText.length > 240) {
+    selectionPreview.textContent = previewText.slice(0, 240);
+    if (previewText.length > 240) {
       selectionPreview.textContent += "…";
     }
-    if (selectedText.length >= MAX_SELECTION_LENGTH) {
+    if (previewText.length >= MAX_SELECTION_LENGTH) {
       selectionPreview.textContent += " (selection limited to 20,000 characters)";
     }
-    setStatus("Đang kết nối với nhà cung cấp AI…");
+    setStatus(initialStatus);
     response.dataset.markdown = "";
     response.setAttribute("aria-busy", "true");
     copyButton.disabled = true;
@@ -212,36 +347,45 @@
     actionFeedback.textContent = "";
     window.clearTimeout(copyFeedbackTimer);
     copyButton.textContent = "📋 Copy";
-    positionPanel(pointer.x + 10, pointer.y + 10);
+    positionPanel(anchor.x, anchor.y);
     panel.hidden = false;
 
     if (requestId) {
       void cancelRequest(requestId);
     }
-    requestId = createRequestId();
-    try {
-      const providerStatus = await chrome.runtime.sendMessage({ type: "GET_PROVIDER_STATUS" });
-      if (!providerStatus?.ok) {
-        showError(requestId, providerStatus?.error || "Could not check your saved AI key.");
-        return;
-      }
-      if (!providerStatus.hasKey) {
-        showSetupNotice();
-        return;
-      }
+    requestId = nextRequestId;
+  }
 
-      setupNotice.hidden = true;
-      const result = await chrome.runtime.sendMessage({
-        type: "EXPLAIN_SELECTION",
-        requestId,
-        text: selectedText
-      });
-      if (!result?.ok) {
-        showError(requestId, result?.error || "Could not start the explanation request.");
-      }
-    } catch {
-      showError(requestId, "Could not contact the extension service worker. Reload the extension and try again.");
+  function startImageExplanation(source, anchor, existingRequestId) {
+    const nextRequestId = existingRequestId || createRequestId();
+    lastRequest = { type: "image", ...source };
+    prepareExplanationRequest(
+      nextRequestId,
+      source.imageDataUrl ? "Cropped screen area" : "Image",
+      "Preparing image for AI analysis…",
+      anchor
+    );
+
+    if (existingRequestId) {
+      return;
     }
+    sendImageRequest(source, nextRequestId);
+  }
+
+  function retryLastExplanation() {
+    if (!lastRequest) {
+      void startExplanation();
+      return;
+    }
+    if (lastRequest.type === "text") {
+      selectedText = lastRequest.text;
+      void startExplanation();
+      return;
+    }
+    startImageExplanation(
+      { imageUrl: lastRequest.imageUrl, imageDataUrl: lastRequest.imageDataUrl },
+      { x: pointer.x, y: pointer.y }
+    );
   }
 
   function closePanel() {
@@ -263,6 +407,18 @@
   });
 
   chrome.runtime.onMessage.addListener((message) => {
+    if (message?.action === "startGlobalCrop") {
+      startCropMode();
+      return;
+    }
+    if (message?.type === "IMAGE_EXPLANATION_START" && isValidRequestId(message.requestId)) {
+      startImageExplanation(
+        { imageUrl: message.imageUrl },
+        { x: window.innerWidth / 2 - 195, y: window.innerHeight / 2 - 270 },
+        message.requestId
+      );
+      return;
+    }
     if (message?.requestId !== requestId) {
       return;
     }
@@ -282,10 +438,10 @@
         showError(requestId, "The provider returned an empty explanation.");
       } else {
         isStreamComplete = true;
-        speakButton.hidden = !isLearningContext;
         if (isLearningContext) {
           renderMarkdown(response, response.dataset.markdown);
         }
+        speakButton.hidden = !hasSpeakableLearningLine();
       }
     } else if (message.type === "EXPLANATION_ERROR" && typeof message.error === "string") {
       showError(requestId, message.error);
@@ -403,10 +559,23 @@
     return (copyable.innerText || copyable.textContent || "").trim();
   }
 
+  function hasSpeakableLearningLine() {
+    return Boolean(response.querySelector(".playable-line .inline-speaker"));
+  }
+
+  function getBrowserSpeechLanguage() {
+    try {
+      const locale = new Intl.Locale(chrome.i18n.getUILanguage());
+      return locale.language === "vi" ? "en-US" : locale.toString();
+    } catch {
+      return "en-US";
+    }
+  }
+
   function speakText(text, language) {
     const Utterance = window.SpeechSynthesisUtterance;
     if (!text || !window.speechSynthesis || typeof Utterance !== "function") {
-      actionFeedback.textContent = "Đọc văn bản không được hỗ trợ trong trình duyệt này.";
+      actionFeedback.textContent = "Read-aloud is not supported in this browser.";
       actionFeedback.dataset.error = "true";
       return;
     }
@@ -418,28 +587,28 @@
       utterance.onend = () => {
         if (activeUtterance === utterance) {
           activeUtterance = null;
-          speakButton.textContent = "🔊 Đọc lên";
-          speakButton.setAttribute("aria-label", "Đọc nội dung giải thích");
+          speakButton.textContent = "🔊 Read aloud";
+          speakButton.setAttribute("aria-label", "Read the explanation aloud");
         }
       };
       utterance.onerror = () => {
         if (activeUtterance === utterance) {
           activeUtterance = null;
-          speakButton.textContent = "🔊 Đọc lên";
-          speakButton.setAttribute("aria-label", "Đọc nội dung giải thích");
-          actionFeedback.textContent = "Không thể phát âm đoạn văn bản này.";
+          speakButton.textContent = "🔊 Read aloud";
+          speakButton.setAttribute("aria-label", "Read the explanation aloud");
+          actionFeedback.textContent = "Could not read this text aloud.";
           actionFeedback.dataset.error = "true";
         }
       };
       activeUtterance = utterance;
-      speakButton.textContent = "⏹ Dừng đọc";
-      speakButton.setAttribute("aria-label", "Dừng đọc");
+      speakButton.textContent = "⏹ Stop reading";
+      speakButton.setAttribute("aria-label", "Stop reading");
       window.speechSynthesis.speak(utterance);
     } catch {
       activeUtterance = null;
-      speakButton.textContent = "🔊 Đọc lên";
-      speakButton.setAttribute("aria-label", "Đọc nội dung giải thích");
-      actionFeedback.textContent = "Không thể phát âm đoạn văn bản này.";
+      speakButton.textContent = "🔊 Read aloud";
+      speakButton.setAttribute("aria-label", "Read the explanation aloud");
+      actionFeedback.textContent = "Could not read this text aloud.";
       actionFeedback.dataset.error = "true";
     }
   }
@@ -451,8 +620,8 @@
     if (synthesis && wasSpeaking) {
       synthesis.cancel();
     }
-    speakButton.textContent = "🔊 Đọc lên";
-    speakButton.setAttribute("aria-label", "Đọc nội dung giải thích");
+    speakButton.textContent = "🔊 Read aloud";
+    speakButton.setAttribute("aria-label", "Read the explanation aloud");
   }
 
   function createInlineSpeaker(text) {
@@ -460,7 +629,7 @@
     speaker.className = "inline-speaker";
     speaker.setAttribute("role", "button");
     speaker.setAttribute("tabindex", "0");
-    speaker.setAttribute("aria-label", `Đọc ví dụ: ${text.slice(0, 60)}`);
+    speaker.setAttribute("aria-label", `Read example aloud: ${text.slice(0, 60)}`);
     speaker.textContent = "🔊";
     speaker.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -483,7 +652,7 @@
     if (/[\uac00-\ud7af]/.test(text)) {
       return "ko-KR";
     }
-    if (/[\u3400-\u9fff]/.test(text) || /[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ]/i.test(text)) {
+    if (/[\u3400-\u9fff]/.test(text) || /[ǎǐǒǔǚǖ]/i.test(text)) {
       return "zh-CN";
     }
     return "en-US";
@@ -610,42 +779,52 @@
   }
 
   function getPlayableLineParts(text) {
-    const samples = getForeignSamples(text);
+    const translationMatch = /\s+(?:—|–|->|→|=)\s+/.exec(text);
+    const translationIndex = translationMatch ? translationMatch.index : -1;
+    const foreignText = translationIndex === -1 ? text : text.slice(0, translationIndex);
+    const samples = getForeignSamples(foreignText, translationIndex !== -1);
     if (!samples.length) {
       return null;
     }
 
     const lastSample = samples[samples.length - 1];
     let boundary = lastSample.end;
-    const markdownClosing = text.slice(boundary).match(/^(?:\*\*|\*|`)+/);
+    const markdownClosing = foreignText.slice(boundary).match(/^(?:\*\*|\*|`)+/);
     if (markdownClosing) {
       boundary += markdownClosing[0].length;
     }
-    const punctuation = text.slice(boundary).match(/^[,，。.!?！？、;；]/);
+    const punctuation = foreignText.slice(boundary).match(/^[,，。.!?！？、;；]/);
     if (punctuation) {
       boundary += punctuation[0].length;
     }
 
     return {
-      before: text.slice(0, boundary),
+      before: foreignText.slice(0, boundary),
       after: text.slice(boundary),
-      speechText: samples.map((sample) => sample.text).join(" ")
+      speechText: [...new Set(samples.map((sample) => sample.text))].join(" ")
     };
   }
 
-  function getForeignSamples(text) {
+  function getForeignSamples(text, hasTranslation) {
     const pattern =
-      /"[^"\r\n]+"|“[^”\r\n]+”|„[^“\r\n]+“|‘[^’\r\n]+’|«[^»\r\n]+»|「[^」\r\n]+」|『[^』\r\n]+』|\/[^/\r\n]{1,80}\/|[\u3040-\u30ff]+|[\uac00-\ud7af]+|[\u3400-\u9fff]+/g;
+      /"[^"\r\n]+"|“[^”\r\n]+”|„[^“\r\n]+“|‘[^’\r\n]+’|«[^»\r\n]+»|「[^」\r\n]+」|『[^』\r\n]+』|\*\*[^*\r\n]+\*\*|\/[^/\r\n]{1,80}\/|[\u3040-\u30ff]+|[\uac00-\ud7af]+|[\u3400-\u9fff]+|[A-Za-z]*[ǎǐǒǔǚǖ]+[A-Za-z]*/gi;
     const samples = [];
     let match;
     while ((match = pattern.exec(text)) !== null) {
       const token = match[0];
-      if (token.startsWith("/") && !isSlashExample(text, match.index, token)) {
-        continue;
-      }
-      const quoted = /^["“„‘«「『]/.test(token);
       const sampleText = getSpeechSample(token);
-      if (quoted && (!isQuotedExample(token) || isLikelyVietnamese(sampleText))) {
+      const isCjk = /[\u3040-\u30ff\uac00-\ud7af\u3400-\u9fff]/.test(token);
+      const isPinyin = /[ǎǐǒǔǚǖ]/i.test(token);
+      const isQuoted = /^["“„‘«「『]/.test(token);
+      const isMarkedTerm = /^\*\*/.test(token) && hasTranslation;
+      const isPronunciation = token.startsWith("/") &&
+        isSlashExample(text, match.index, token) &&
+        isPhoneticText(sampleText);
+
+      if (
+        !sampleText ||
+        (!isCjk && !isPinyin && !isPronunciation && !(isQuoted && hasTranslation) && !isMarkedTerm)
+      ) {
         continue;
       }
       samples.push({
@@ -657,10 +836,8 @@
     return samples;
   }
 
-  function isLikelyVietnamese(text) {
-    const normalized = text.toLocaleLowerCase("vi");
-    return /[ăâđêôơư]/u.test(normalized) ||
-      /\b(?:xin chào|xin chao|nghĩa là|nghia la|có nghĩa|co nghia|dịch là|dich la|tiếng việt|tieng viet|tức là|tuc la)\b/u.test(normalized);
+  function isPhoneticText(text) {
+    return /[ǎǐǒǔǚǖˈˌːəɪʊæɑɒʌɜθðʃʒŋɹɾɡɕɥɻɲç]/i.test(text);
   }
 
   function appendInlineMarkdown(parent, text) {
@@ -723,8 +900,10 @@
 
   function getSpeechSample(token) {
     return token
+      .replace(/^\*\*|\*\*$/g, "")
+      .replace(/^`|`$/g, "")
       .replace(/^[/"“„‘«「『]/, "")
-      .replace(/[/"”’»」』"]$/, "")
+      .replace(/[/"”’»」』“"]$/, "")
       .trim();
   }
 
@@ -771,6 +950,198 @@
     response.setAttribute("aria-busy", "false");
     setupNotice.hidden = false;
     copyButton.disabled = true;
+  }
+
+  function showImageActions(image) {
+    if (!image.isConnected) {
+      return;
+    }
+    activeImage = image;
+    window.clearTimeout(hideImageActionsTimer);
+    imageActions.classList.remove("is-hiding");
+    const bounds = image.getBoundingClientRect();
+    if (bounds.width < 24 || bounds.height < 24) {
+      imageActions.hidden = true;
+      return;
+    }
+    imageActions.hidden = false;
+    const actionsBounds = imageActions.getBoundingClientRect();
+    positionElement(
+      imageActions,
+      bounds.right - actionsBounds.width - 8,
+      bounds.top + 8,
+      actionsBounds.width,
+      actionsBounds.height
+    );
+  }
+
+  function getImageAnchor(image) {
+    if (!image) {
+      return { x: window.innerWidth / 2 - 195, y: window.innerHeight / 2 - 270 };
+    }
+    const bounds = image.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  }
+
+  function scheduleHideImageActions() {
+    window.clearTimeout(hideImageActionsTimer);
+    hideImageActionsTimer = window.setTimeout(() => {
+      imageActions.classList.add("is-hiding");
+      hideImageActionsTimer = window.setTimeout(() => {
+        imageActions.hidden = true;
+        imageActions.classList.remove("is-hiding");
+        activeImage = null;
+      }, 160);
+    }, 180);
+  }
+
+  function startCropMode() {
+    window.clearTimeout(hideImageActionsTimer);
+    stopSpeech();
+    cancelCurrentRequest();
+    imageActions.hidden = true;
+    launcher.hidden = true;
+    panel.hidden = true;
+    cropStart = null;
+    cropRectangle = null;
+    cropSelection.hidden = true;
+    cropOverlay.classList.remove("is-selecting");
+    cropOverlay.hidden = false;
+    cropOverlay.focus();
+  }
+
+  function cancelCropMode() {
+    cropStart = null;
+    cropRectangle = null;
+    cropSelection.hidden = true;
+    cropOverlay.classList.remove("is-selecting");
+    cropOverlay.hidden = true;
+  }
+
+  function getCropRectangle(start, end) {
+    const left = Math.max(0, Math.min(start.x, end.x));
+    const top = Math.max(0, Math.min(start.y, end.y));
+    const right = Math.min(window.innerWidth, Math.max(start.x, end.x));
+    const bottom = Math.min(window.innerHeight, Math.max(start.y, end.y));
+    return {
+      left,
+      top,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top)
+    };
+  }
+
+  function updateCropSelection() {
+    if (!cropRectangle) {
+      cropSelection.hidden = true;
+      return;
+    }
+    cropSelection.hidden = false;
+    cropSelection.style.left = `${cropRectangle.left}px`;
+    cropSelection.style.top = `${cropRectangle.top}px`;
+    cropSelection.style.width = `${cropRectangle.width}px`;
+    cropSelection.style.height = `${cropRectangle.height}px`;
+  }
+
+  async function captureAndExplainCrop(rectangle, anchor) {
+    const nextRequestId = createRequestId();
+    lastRequest = { type: "image", imageDataUrl: "" };
+    prepareExplanationRequest(
+      nextRequestId,
+      "Cropped screen area",
+      "Capturing the selected screen area…",
+      anchor
+    );
+    panel.hidden = true;
+    try {
+      await new Promise((resolve) => {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+      });
+      if (requestId !== nextRequestId) {
+        return;
+      }
+      const capture = await chrome.runtime.sendMessage({ type: "CAPTURE_VISIBLE_TAB" });
+      if (requestId !== nextRequestId) {
+        return;
+      }
+      if (!capture?.ok || typeof capture.dataUrl !== "string") {
+        throw new Error(capture?.error || "Could not capture the visible tab.");
+      }
+      const imageDataUrl = await cropScreenshot(capture.dataUrl, rectangle);
+      if (requestId !== nextRequestId) {
+        return;
+      }
+      lastRequest = { type: "image", imageDataUrl };
+      panel.hidden = false;
+      setStatus("Sending the cropped image for analysis…");
+      sendImageRequest({ imageDataUrl }, nextRequestId);
+    } catch (error) {
+      panel.hidden = false;
+      showError(nextRequestId, error instanceof Error ? error.message : "Could not crop the screenshot.");
+    }
+  }
+
+  async function cropScreenshot(dataUrl, rectangle) {
+    const image = new Image();
+    const loadedImage = new Promise((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("Could not read the captured screenshot."));
+    });
+    image.src = dataUrl;
+    await loadedImage;
+
+    const fallbackScale = window.devicePixelRatio || 1;
+    const scaleX = image.naturalWidth / window.innerWidth || fallbackScale;
+    const scaleY = image.naturalHeight / window.innerHeight || fallbackScale;
+    const sourceX = Math.max(0, Math.round(rectangle.left * scaleX));
+    const sourceY = Math.max(0, Math.round(rectangle.top * scaleY));
+    const sourceWidth = Math.min(image.naturalWidth - sourceX, Math.round(rectangle.width * scaleX));
+    const sourceHeight = Math.min(image.naturalHeight - sourceY, Math.round(rectangle.height * scaleY));
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+      throw new Error("The selected crop area is empty.");
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = sourceWidth;
+    canvas.height = sourceHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Could not create an image canvas for cropping.");
+    }
+    context.drawImage(
+      image,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      sourceWidth,
+      sourceHeight
+    );
+    const croppedImage = canvas.toDataURL("image/png");
+    if (croppedImage.length > 11_185_000) {
+      throw new Error("The cropped image exceeds the 8 MB size limit. Select a smaller area.");
+    }
+    return croppedImage;
+  }
+
+  function sendImageRequest(source, nextRequestId) {
+    void chrome.runtime.sendMessage({
+      type: "EXPLAIN_IMAGE",
+      requestId: nextRequestId,
+      ...source
+    }).then((result) => {
+      if (!result?.ok) {
+        showError(nextRequestId, result?.error || "Could not start image analysis.");
+      }
+    }).catch(() => {
+      showError(nextRequestId, "Could not contact the extension service worker. Reload the extension and try again.");
+    });
+  }
+
+  function isValidRequestId(value) {
+    return typeof value === "string" && value.length > 0 && value.length <= 100;
   }
 
   function setStatus(message) {

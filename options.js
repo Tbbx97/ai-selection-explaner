@@ -11,7 +11,7 @@ const removeOpenaiButton = document.querySelector("#remove-openai");
 let savedKeys = { gemini: false, openai: false };
 
 initialize().catch((error) => {
-  showStatus(`Không thể tải cấu hình: ${error.message}`, true);
+  showStatus(`Could not load settings: ${error.message}`, true);
 });
 
 removeGeminiButton.addEventListener("click", () => removeKey("gemini"));
@@ -46,20 +46,20 @@ form.addEventListener("submit", async (event) => {
     geminiInput.value = "";
     openaiInput.value = "";
     updateKeyStates();
-    showStatus("Đã lưu cấu hình trên máy tính này. Bạn sẵn sàng sử dụng rồi! 🎉");
+    showStatus("Settings saved on this device. You are ready to go! 🎉");
   } catch (error) {
-    showStatus(`Không thể lưu cấu hình: ${error.message}`, true);
+    showStatus(`Could not save settings: ${error.message}`, true);
   } finally {
     saveButton.disabled = false;
   }
 });
 
 geminiInput.addEventListener("input", () => {
-  geminiState.textContent = geminiInput.value ? "Key mới đã nhập" : savedKeys.gemini ? "•••••••• Đã lưu" : "";
+  geminiState.textContent = geminiInput.value ? "New key entered" : savedKeys.gemini ? "•••••••• Saved" : "";
 });
 
 openaiInput.addEventListener("input", () => {
-  openaiState.textContent = openaiInput.value ? "Key mới đã nhập" : savedKeys.openai ? "•••••••• Đã lưu" : "";
+  openaiState.textContent = openaiInput.value ? "New key entered" : savedKeys.openai ? "•••••••• Saved" : "";
 });
 
 async function initialize() {
@@ -72,10 +72,10 @@ async function initialize() {
 }
 
 function updateKeyStates() {
-  geminiInput.placeholder = savedKeys.gemini ? "Đã có key — dán key mới để thay thế" : "Dán chìa khóa Gemini vào đây";
-  openaiInput.placeholder = savedKeys.openai ? "Đã có key — dán key mới để thay thế" : "Dán chìa khóa OpenAI vào đây";
-  geminiState.textContent = savedKeys.gemini ? "•••••••• Đã lưu" : "";
-  openaiState.textContent = savedKeys.openai ? "•••••••• Đã lưu" : "";
+  geminiInput.placeholder = savedKeys.gemini ? "Key saved — paste a new one to replace it" : "Paste your Gemini API key here";
+  openaiInput.placeholder = savedKeys.openai ? "Key saved — paste a new one to replace it" : "Paste your OpenAI API key here";
+  geminiState.textContent = savedKeys.gemini ? "•••••••• Saved" : "";
+  openaiState.textContent = savedKeys.openai ? "•••••••• Saved" : "";
   removeGeminiButton.hidden = !savedKeys.gemini;
   removeOpenaiButton.hidden = !savedKeys.openai;
 }
@@ -91,9 +91,9 @@ async function removeKey(provider) {
       await chrome.storage.local.set({ provider: remainingProvider });
     }
     updateKeyStates();
-    showStatus(`Đã xóa key ${provider === "gemini" ? "Gemini" : "OpenAI"} khỏi máy tính này.`);
+    showStatus(`${provider === "gemini" ? "Gemini" : "OpenAI"} key removed from this device.`);
   } catch (error) {
-    showStatus(`Không thể xóa key: ${error.message}`, true);
+    showStatus(`Could not remove key: ${error.message}`, true);
   }
 }
 

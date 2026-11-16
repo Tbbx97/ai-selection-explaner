@@ -7,7 +7,8 @@
     "storage",
     "activeTab",
     "scripting",
-    "clipboardWrite"
+    "clipboardWrite",
+    "contextMenus"
   ],
   "host_permissions": [
     "http://*/*",
@@ -41,5 +42,14 @@
       ]
     }
   ],
-  "options_page": "options.html"
+  "options_page": "options.html",
+  "commands": {
+    "activate-crop": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+X",
+        "mac": "MacCtrl+Shift+X"
+      },
+      "description": "Kích hoạt chế độ kéo khung Crop màn hình"
+    }
+  }
 }
