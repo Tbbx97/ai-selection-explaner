@@ -3,7 +3,6 @@ const RESPONSE_TIMEOUT_MS = 30000;
 const STREAM_IDLE_TIMEOUT_MS = 20000;
 const STREAM_MAX_DURATION_MS = 60000;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const IMAGE_CONTEXT_MENU_ID = "ai-selection-explainer-image";
 const GEMINI_MODELS = [
   "gemini-3.1-flash-lite",
@@ -12,11 +11,16 @@ const GEMINI_MODELS = [
 ];
 const activeRequests = new Map();
 
+chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
+  .catch((error) => {
+    console.error("Could not restrict local API key storage access:", error);
+  });
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: IMAGE_CONTEXT_MENU_ID,
-      title: "✨ Explain this image with AI",
+      title: "✂ Crop this image area with AI",
       contexts: ["image"]
     }, () => {
       if (chrome.runtime.lastError) {
@@ -29,12 +33,14 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (
     info.menuItemId !== IMAGE_CONTEXT_MENU_ID ||
-    !Number.isInteger(tab?.id) ||
-    typeof info.srcUrl !== "string"
+    !Number.isInteger(tab?.id)
   ) {
     return;
   }
-  void explainContextMenuImage(tab.id, info.srcUrl);
+  void chrome.tabs.sendMessage(tab.id, { action: "startGlobalCrop" })
+    .catch((error) => {
+      console.warn("Could not start image crop:", error);
+    });
 });
 
 chrome.commands.onCommand.addListener((command) => {
@@ -87,6 +93,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "CAPTURE_VISIBLE_TAB") {
+    if (sender.frameId !== 0 || sender.tab.active !== true) {
+      sendResponse({
+        ok: false,
+        error: "Screen capture is only available from the active top-level tab."
+      });
+      return false;
+    }
     chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: "png" })
       .then((dataUrl) => sendResponse({ ok: true, dataUrl }))
       .catch((error) => sendResponse({
@@ -114,10 +127,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: false, error: "The selected text is invalid or too long." });
     return false;
   }
+  if (message.type === "EXPLAIN_IMAGE" && message.imageUrl !== undefined) {
+    sendResponse({
+      ok: false,
+      error: "Remote image URLs are not fetched for security. Use the crop shortcut or an image data URL."
+    });
+    return false;
+  }
   const request = message.type === "EXPLAIN_SELECTION"
     ? { text: message.text }
     : {
-      imageUrl: message.imageUrl,
       imageDataUrl: message.imageDataUrl
     };
   if (!isValidExplanationRequest(message.type, request)) {
@@ -159,30 +178,9 @@ function isValidExplanationRequest(type, request) {
       request.text.trim().length > 5 &&
       request.text.length <= MAX_SELECTION_LENGTH;
   }
-
-  const hasImageUrl = typeof request.imageUrl === "string";
-  const hasImageDataUrl = typeof request.imageDataUrl === "string";
-  if (hasImageUrl === hasImageDataUrl) {
-    return false;
-  }
-  if (hasImageUrl) {
-    return isValidImageUrl(request.imageUrl);
-  }
-  return request.imageDataUrl.length <= Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 128;
-}
-
-function isValidImageUrl(value) {
-  if (typeof value !== "string" || value.length > 4096) {
-    return false;
-  }
-  try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") &&
-      !url.username &&
-      !url.password;
-  } catch {
-    return false;
-  }
+  return type === "EXPLAIN_IMAGE" &&
+    typeof request.imageDataUrl === "string" &&
+    request.imageDataUrl.length <= Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 128;
 }
 
 function parseImageDataUrl(dataUrl) {
@@ -199,82 +197,6 @@ function parseImageDataUrl(dataUrl) {
     throw new Error("The image exceeds the 8 MB size limit.");
   }
   return { mimeType: match[1].toLowerCase(), data: base64 };
-}
-
-async function fetchImageData(imageUrl, signal) {
-  if (!isValidImageUrl(imageUrl)) {
-    throw new Error("Only HTTP and HTTPS image URLs are supported.");
-  }
-
-  const response = await fetch(imageUrl, {
-    signal,
-    credentials: "omit",
-    redirect: "error"
-  });
-  if (!response.ok) {
-    throw new Error(`Could not load the image (HTTP ${response.status}).`);
-  }
-
-  const mimeType = (response.headers.get("content-type") || "")
-    .split(";", 1)[0]
-    .trim()
-    .toLowerCase();
-  if (!SUPPORTED_IMAGE_TYPES.has(mimeType)) {
-    throw new Error("This image format is not supported. Use PNG, JPEG, or WebP.");
-  }
-
-  const contentLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_BYTES) {
-    throw new Error("The image exceeds the 8 MB size limit.");
-  }
-  if (!response.body) {
-    throw new Error("The image response did not contain readable data.");
-  }
-
-  const reader = response.body.getReader();
-  const chunks = [];
-  let totalBytes = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
-    }
-    totalBytes += value.byteLength;
-    if (totalBytes > MAX_IMAGE_BYTES) {
-      await reader.cancel();
-      throw new Error("The image exceeds the 8 MB size limit.");
-    }
-    chunks.push(value);
-  }
-
-  const bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return { mimeType, data: btoa(binary) };
-}
-
-async function explainContextMenuImage(tabId, imageUrl) {
-  if (!isValidImageUrl(imageUrl)) {
-    return;
-  }
-  const requestId = crypto.randomUUID();
-  const started = await sendToTab(tabId, {
-    type: "IMAGE_EXPLANATION_START",
-    requestId,
-    imageUrl
-  });
-  if (!started) {
-    return;
-  }
-  void streamExplanation(tabId, requestId, { imageUrl });
 }
 
 async function streamExplanation(tabId, requestId, request) {
@@ -301,16 +223,7 @@ async function streamExplanation(tabId, requestId, request) {
       return;
     }
 
-    const image = request.imageDataUrl
-      ? parseImageDataUrl(request.imageDataUrl)
-      : request.imageUrl
-        ? await withTimeout(
-          fetchImageData(request.imageUrl, controller.signal),
-          RESPONSE_TIMEOUT_MS,
-          controller,
-          "Loading the image took too long. Try another image."
-        )
-        : null;
+    const image = request.imageDataUrl ? parseImageDataUrl(request.imageDataUrl) : null;
     const userText = request.text || "Please explain the important content in this image.";
     const response = await withTimeout(
       provider === "gemini"
@@ -506,7 +419,7 @@ function createSystemPrompt(osLanguage) {
   return [
     `You are a professional language and vision AI assistant. Your task is to explain, translate, or break down the text/image context provided. CRITICAL RULE: You MUST write the entire explanation, definitions of vocabularies, and response in ${osLanguage} language so the user can understand it natively and easily.`,
     "On the very first line, output exactly [CONTEXT:LEARNING] only when the selected text or image content is explicitly educational material, such as a vocabulary item, foreign-language phrase, pronunciation guide, or language lesson. Do not classify ordinary content as learning material just because it contains a quotation or foreign word. Otherwise, output exactly [CONTEXT:GENERAL]. Start the explanation on the next line.",
-    "For learning-related explanations, format each speakable foreign-language phrase or vocabulary item before its translation, optionally followed by its pronunciation, for example: **你好** /nǐ hǎo/ — hello. Keep the translation after the em dash so the extension can place a read-aloud control beside the phrase."
+    "For learning-related explanations, format each speakable foreign-language phrase or vocabulary item before its translation, optionally followed by its pronunciation, for example: **hello** /həˈloʊ/ — a greeting. Keep the translation after the em dash so the extension can place a read-aloud control beside the phrase."
   ].join("\n\n");
 }
 
@@ -517,6 +430,7 @@ async function fetchProvider(provider, apiKey, text, signal, systemPrompt, image
 
   return fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
+    redirect: "error",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
@@ -599,6 +513,7 @@ async function fetchGeminiModel(apiKey, text, model, signal, systemPrompt, image
           }
         }
       }),
+      redirect: "error",
       signal
     }
   );

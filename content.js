@@ -20,7 +20,9 @@
 
   const launcher = document.createElement("button");
   launcher.className = "aie-launcher";
+  launcher.id = "ai-explain-btn";
   launcher.type = "button";
+  launcher.setAttribute("aria-hidden", "true");
   launcher.setAttribute("aria-label", "Explain selected text with AI");
   launcher.title = "Explain selection";
   const launcherIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -36,11 +38,11 @@
   const imageActions = document.createElement("div");
   imageActions.className = "aie-image-actions";
   imageActions.hidden = true;
-  const explainImageButton = document.createElement("button");
-  explainImageButton.className = "aie-image-action-button";
-  explainImageButton.type = "button";
-  explainImageButton.textContent = "✨ Giải thích ảnh";
-  imageActions.append(explainImageButton);
+  const cropImageButton = document.createElement("button");
+  cropImageButton.className = "aie-image-action-button";
+  cropImageButton.type = "button";
+  cropImageButton.textContent = "✂️ Crop vùng ảnh này";
+  imageActions.append(cropImageButton);
   shadow.append(imageActions);
 
   const cropOverlay = document.createElement("div");
@@ -57,8 +59,10 @@
 
   const panel = document.createElement("section");
   panel.className = "aie-panel";
+  panel.id = "ai-explain-popup-root";
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-label", "AI explanation");
+  panel.setAttribute("aria-hidden", "true");
   panel.hidden = true;
 
   const header = document.createElement("header");
@@ -141,7 +145,13 @@
   shadow.append(panel);
 
   let selectedText = "";
+  let selectionRect = null;
+  let selectionIdentity = null;
+  let hasExplained = false;
+  let isContentVisible = true;
   let requestId = "";
+  let panelAnchor = null;
+  let panelAttachedToSelection = false;
   let isLearningContext = false;
   let isStreamComplete = false;
   let contextDecisionMade = false;
@@ -156,9 +166,16 @@
   let cropRectangle = null;
   let lastRequest = null;
   let pointer = { x: 0, y: 0 };
+  let isCropModeActive = false;
+  const visibilityTimers = new Map();
 
   document.addEventListener("pointermove", (event) => {
     pointer = { x: event.clientX, y: event.clientY };
+  }, { passive: true });
+
+  document.addEventListener("mousemove", (event) => {
+    pointer = { x: event.clientX, y: event.clientY };
+    updateSelectionVisibility(event);
   }, { passive: true });
 
   document.addEventListener("mouseup", (event) => {
@@ -170,12 +187,27 @@
       const selection = window.getSelection();
       const text = selection?.toString().trim() || "";
       if (text.length <= 5) {
-        launcher.hidden = true;
         return;
       }
+      const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+      const nextRect = range?.getBoundingClientRect();
+      if (!nextRect || (!nextRect.width && !nextRect.height)) {
+        return;
+      }
+
+      if (isDifferentSelection(text, selection)) {
+        resetForNewSelection();
+      }
       selectedText = text.slice(0, MAX_SELECTION_LENGTH);
-      positionElement(launcher, pointer.x + 10, pointer.y + 10, 48, 48);
-      launcher.hidden = false;
+      selectionRect = nextRect;
+      selectionIdentity = {
+        anchorNode: selection.anchorNode,
+        anchorOffset: selection.anchorOffset,
+        focusNode: selection.focusNode,
+        focusOffset: selection.focusOffset
+      };
+      isContentVisible = true;
+      showSelectionContent();
     }, 0);
   }, true);
 
@@ -198,16 +230,10 @@
     imageActions.classList.remove("is-hiding");
   });
   imageActions.addEventListener("pointerleave", scheduleHideImageActions);
-  explainImageButton.addEventListener("click", (event) => {
+  cropImageButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const imageUrl = activeImage?.currentSrc || activeImage?.src;
-    if (imageUrl) {
-      const source = imageUrl.startsWith("data:image/")
-        ? { imageDataUrl: imageUrl }
-        : { imageUrl };
-      startImageExplanation(source, getImageAnchor(activeImage));
-    }
+    startCropMode();
   });
   cropOverlay.addEventListener("mousedown", (event) => {
     if (event.button !== 0 || event.target !== cropOverlay) {
@@ -237,8 +263,11 @@
     cropSelection.hidden = true;
     cropOverlay.classList.remove("is-selecting");
     cropOverlay.hidden = true;
+    isCropModeActive = false;
     if (completedRectangle.width >= 8 && completedRectangle.height >= 8) {
       void captureAndExplainCrop(completedRectangle, { x: event.clientX, y: event.clientY });
+    } else {
+      updateSelectionVisibility({ clientX: pointer.x, clientY: pointer.y });
     }
   });
   cropOverlay.addEventListener("keydown", (event) => {
@@ -290,7 +319,7 @@
       nextRequestId,
       text,
       "Connecting to the AI provider…",
-      { x: pointer.x + 10, y: pointer.y + 10 }
+      getSelectionPanelAnchor()
     );
 
     try {
@@ -330,7 +359,7 @@
     contextSkipLineFeed = false;
     imageActions.hidden = true;
     cropOverlay.hidden = true;
-    launcher.hidden = true;
+    setWidgetVisible(launcher, false, true);
     selectionPreview.textContent = previewText.slice(0, 240);
     if (previewText.length > 240) {
       selectionPreview.textContent += "…";
@@ -342,13 +371,21 @@
     response.dataset.markdown = "";
     response.setAttribute("aria-busy", "true");
     copyButton.disabled = true;
+    retryButton.disabled = false;
     speakButton.hidden = true;
     setupNotice.hidden = true;
     actionFeedback.textContent = "";
     window.clearTimeout(copyFeedbackTimer);
     copyButton.textContent = "📋 Copy";
-    positionPanel(anchor.x, anchor.y);
-    panel.hidden = false;
+    panelAnchor = { x: anchor.x, y: anchor.y };
+    panelAttachedToSelection = lastRequest?.type === "text" && Boolean(selectionRect);
+    isContentVisible = true;
+    setWidgetVisible(panel, true);
+    positionPanel(
+      anchor.x,
+      anchor.y,
+      panelAttachedToSelection ? selectionRect : null
+    );
 
     if (requestId) {
       void cancelRequest(requestId);
@@ -356,8 +393,8 @@
     requestId = nextRequestId;
   }
 
-  function startImageExplanation(source, anchor, existingRequestId) {
-    const nextRequestId = existingRequestId || createRequestId();
+  function startImageExplanation(source, anchor) {
+    const nextRequestId = createRequestId();
     lastRequest = { type: "image", ...source };
     prepareExplanationRequest(
       nextRequestId,
@@ -365,14 +402,11 @@
       "Preparing image for AI analysis…",
       anchor
     );
-
-    if (existingRequestId) {
-      return;
-    }
     sendImageRequest(source, nextRequestId);
   }
 
   function retryLastExplanation() {
+    hasExplained = true;
     if (!lastRequest) {
       void startExplanation();
       return;
@@ -383,7 +417,7 @@
       return;
     }
     startImageExplanation(
-      { imageUrl: lastRequest.imageUrl, imageDataUrl: lastRequest.imageDataUrl },
+      { imageDataUrl: lastRequest.imageDataUrl },
       { x: pointer.x, y: pointer.y }
     );
   }
@@ -391,8 +425,26 @@
   function closePanel() {
     stopSpeech();
     cancelCurrentRequest();
-    panel.hidden = true;
-    launcher.hidden = true;
+    selectedText = "";
+    selectionRect = null;
+    selectionIdentity = null;
+    hasExplained = false;
+    isContentVisible = false;
+    panelAnchor = null;
+    panelAttachedToSelection = false;
+    lastRequest = null;
+    window.getSelection()?.removeAllRanges();
+    setWidgetVisible(panel, false, true);
+    setWidgetVisible(launcher, false, true);
+    selectionPreview.textContent = "";
+    response.replaceChildren(status);
+    response.dataset.markdown = "";
+    response.setAttribute("aria-busy", "false");
+    status.hidden = true;
+    setupNotice.hidden = true;
+    copyButton.disabled = true;
+    retryButton.disabled = true;
+    speakButton.hidden = true;
   }
 
   setupLink.addEventListener("click", async () => {
@@ -411,14 +463,6 @@
       startCropMode();
       return;
     }
-    if (message?.type === "IMAGE_EXPLANATION_START" && isValidRequestId(message.requestId)) {
-      startImageExplanation(
-        { imageUrl: message.imageUrl },
-        { x: window.innerWidth / 2 - 195, y: window.innerHeight / 2 - 270 },
-        message.requestId
-      );
-      return;
-    }
     if (message?.requestId !== requestId) {
       return;
     }
@@ -430,6 +474,8 @@
       (message.type === "EXPLANATION_CHUNK" || message.type === "streamChunk") &&
       typeof message.chunk === "string"
     ) {
+      hasExplained = true;
+      updateSelectionVisibility({ clientX: pointer.x, clientY: pointer.y });
       appendVisibleChunk(filterContextChunk(message.chunk));
     } else if (message.type === "EXPLANATION_DONE" || message.type === "streamDone") {
       appendVisibleChunk(finishContextFilter());
@@ -538,6 +584,10 @@
     if (!chunk) {
       return;
     }
+    if (!hasExplained) {
+      hasExplained = true;
+      updateSelectionVisibility({ clientX: pointer.x, clientY: pointer.y });
+    }
     if (response.contains(status)) {
       response.replaceChildren();
     }
@@ -564,12 +614,22 @@
   }
 
   function getBrowserSpeechLanguage() {
-    try {
-      const locale = new Intl.Locale(chrome.i18n.getUILanguage());
-      return locale.language === "vi" ? "en-US" : locale.toString();
-    } catch {
-      return "en-US";
+    const preferredLanguages = [
+      ...(Array.isArray(navigator.languages) ? navigator.languages : []),
+      navigator.language,
+      chrome.i18n.getUILanguage()
+    ];
+    for (const language of preferredLanguages) {
+      if (typeof language !== "string" || !language.trim()) {
+        continue;
+      }
+      try {
+        return new Intl.Locale(language).toString();
+      } catch {
+        continue;
+      }
     }
+    return "en-US";
   }
 
   function speakText(text, language) {
@@ -952,6 +1012,210 @@
     copyButton.disabled = true;
   }
 
+  function isDifferentSelection(text, selection) {
+    if (!selectedText || !selectionIdentity || text !== selectedText || lastRequest?.type === "image") {
+      return true;
+    }
+    return selection.anchorNode !== selectionIdentity.anchorNode ||
+      selection.anchorOffset !== selectionIdentity.anchorOffset ||
+      selection.focusNode !== selectionIdentity.focusNode ||
+      selection.focusOffset !== selectionIdentity.focusOffset;
+  }
+
+  function resetForNewSelection() {
+    stopSpeech();
+    cancelCurrentRequest();
+    selectionRect = null;
+    selectionIdentity = null;
+    hasExplained = false;
+    isContentVisible = true;
+    panelAnchor = null;
+    panelAttachedToSelection = false;
+    lastRequest = null;
+    isLearningContext = false;
+    isStreamComplete = false;
+    setWidgetVisible(panel, false, true);
+    setWidgetVisible(launcher, false, true);
+    selectionPreview.textContent = "";
+    response.replaceChildren(status);
+    response.dataset.markdown = "";
+    response.setAttribute("aria-busy", "false");
+    status.hidden = true;
+    setupNotice.hidden = true;
+    copyButton.disabled = true;
+    retryButton.disabled = true;
+    speakButton.hidden = true;
+    actionFeedback.textContent = "";
+  }
+
+  function getSelectionPanelAnchor() {
+    if (selectionRect) {
+      return { x: selectionRect.left, y: selectionRect.bottom };
+    }
+    return { x: pointer.x + 10, y: pointer.y + 10 };
+  }
+
+  function showSelectionContent() {
+    if (hasExplained || requestId) {
+      setWidgetVisible(launcher, false, true);
+      if (!panelAnchor) {
+        panelAnchor = getSelectionPanelAnchor();
+        panelAttachedToSelection = Boolean(selectionRect);
+      }
+      setWidgetVisible(panel, true);
+      if (panelAttachedToSelection && selectionRect) {
+        panelAnchor = getSelectionPanelAnchor();
+        positionPanel(panelAnchor.x, panelAnchor.y, selectionRect);
+      } else {
+        positionPanel(panelAnchor.x, panelAnchor.y);
+      }
+      return;
+    }
+
+    setWidgetVisible(panel, false, true);
+    const launcherPosition = getSelectionLauncherPosition();
+    positionElement(launcher, launcherPosition.x, launcherPosition.y, 48, 48);
+    setWidgetVisible(launcher, true);
+  }
+
+  function getSelectionLauncherPosition() {
+    const width = 48;
+    const gap = 8;
+    let x = selectionRect.right + gap;
+    if (x + width > window.innerWidth - 8) {
+      x = selectionRect.left - width - gap;
+    }
+    return { x, y: selectionRect.top };
+  }
+
+  function isMouseInsideElement(event, element) {
+    if (!element || element.hidden) {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    const insideX = event.clientX >= rect.left && event.clientX <= rect.right;
+    const insideY = event.clientY >= rect.top && event.clientY <= rect.bottom;
+    return insideX && insideY;
+  }
+
+  function updateSelectionVisibility(event) {
+    if (!selectionRect || !selectedText || isCropModeActive || lastRequest?.type === "image") {
+      return;
+    }
+    const isInsidePanel = isMouseInsideElement(event, panel);
+    const isInsideLauncher = isMouseInsideElement(event, launcher);
+    const isOverSelection = isMouseTrulyOverSelection(event);
+    if (
+      isOverSelection &&
+      !isInsidePanel &&
+      !isInsideLauncher &&
+      panelAttachedToSelection &&
+      !panel.hidden &&
+      selectionRect
+    ) {
+      panelAnchor = getSelectionPanelAnchor();
+      positionPanel(panelAnchor.x, panelAnchor.y, selectionRect);
+    }
+
+    const isInside = isOverSelection || isInsidePanel || isInsideLauncher;
+    if (!isInside && isContentVisible) {
+      isContentVisible = false;
+      const currentWidget = hasExplained || requestId ? panel : launcher;
+      setWidgetVisible(currentWidget, false);
+      return;
+    }
+
+    if (isInside && !isContentVisible) {
+      isContentVisible = true;
+      showSelectionContent();
+    }
+  }
+
+  function isMouseTrulyOverSelection(event) {
+    const elementUnderMouse = document.elementFromPoint(event.clientX, event.clientY);
+    if (!elementUnderMouse) {
+      return false;
+    }
+
+    const selection = window.getSelection();
+    const range = selection && selection.rangeCount > 0 && !selection.isCollapsed
+      ? selection.getRangeAt(0)
+      : null;
+    if (range) {
+      const currentRect = range.getBoundingClientRect();
+      if (currentRect.width || currentRect.height) {
+        selectionRect = currentRect;
+      }
+    }
+
+    if (isMouseInsideElement(event, panel) || isMouseInsideElement(event, launcher)) {
+      return true;
+    }
+    if (!range || elementUnderMouse === host || host.contains(elementUnderMouse)) {
+      return false;
+    }
+
+    const node = range.commonAncestorContainer;
+    const parentNode = node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode;
+    if (!parentNode || typeof parentNode.contains !== "function") {
+      return false;
+    }
+
+    const currentRects = range.getClientRects();
+    for (let index = 0; index < currentRects.length; index += 1) {
+      const rect = currentRects[index];
+      if (
+        event.clientX >= rect.left - 5 &&
+        event.clientX <= rect.right + 5 &&
+        event.clientY >= rect.top - 5 &&
+        event.clientY <= rect.bottom + 5 &&
+        (parentNode.contains(elementUnderMouse) || elementUnderMouse.contains(parentNode))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function setWidgetVisible(element, visible, immediate = false) {
+    window.clearTimeout(visibilityTimers.get(element));
+    visibilityTimers.delete(element);
+    if (visible) {
+      const needsReveal = element.hidden || element.classList.contains("aie-selection-fading");
+      element.hidden = false;
+      element.setAttribute("aria-hidden", "false");
+      if (!needsReveal) {
+        return;
+      }
+      element.classList.add("aie-selection-fading");
+      window.requestAnimationFrame(() => {
+        if (!element.hidden) {
+          element.classList.remove("aie-selection-fading");
+        }
+      });
+      return;
+    }
+
+    element.setAttribute("aria-hidden", "true");
+    if (immediate) {
+      element.hidden = true;
+      element.classList.remove("aie-selection-fading");
+      return;
+    }
+    if (element.hidden) {
+      return;
+    }
+
+    element.classList.add("aie-selection-fading");
+    const timer = window.setTimeout(() => {
+      if (element.classList.contains("aie-selection-fading")) {
+        element.hidden = true;
+      }
+      visibilityTimers.delete(element);
+    }, 160);
+    visibilityTimers.set(element, timer);
+  }
+
   function showImageActions(image) {
     if (!image.isConnected) {
       return;
@@ -975,14 +1239,6 @@
     );
   }
 
-  function getImageAnchor(image) {
-    if (!image) {
-      return { x: window.innerWidth / 2 - 195, y: window.innerHeight / 2 - 270 };
-    }
-    const bounds = image.getBoundingClientRect();
-    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
-  }
-
   function scheduleHideImageActions() {
     window.clearTimeout(hideImageActionsTimer);
     hideImageActionsTimer = window.setTimeout(() => {
@@ -1000,8 +1256,11 @@
     stopSpeech();
     cancelCurrentRequest();
     imageActions.hidden = true;
-    launcher.hidden = true;
-    panel.hidden = true;
+    activeImage = null;
+    isContentVisible = false;
+    isCropModeActive = true;
+    setWidgetVisible(launcher, false, true);
+    setWidgetVisible(panel, false, true);
     cropStart = null;
     cropRectangle = null;
     cropSelection.hidden = true;
@@ -1016,6 +1275,8 @@
     cropSelection.hidden = true;
     cropOverlay.classList.remove("is-selecting");
     cropOverlay.hidden = true;
+    isCropModeActive = false;
+    updateSelectionVisibility({ clientX: pointer.x, clientY: pointer.y });
   }
 
   function getCropRectangle(start, end) {
@@ -1052,7 +1313,7 @@
       "Capturing the selected screen area…",
       anchor
     );
-    panel.hidden = true;
+    setWidgetVisible(panel, false, true);
     try {
       await new Promise((resolve) => {
         window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
@@ -1072,11 +1333,11 @@
         return;
       }
       lastRequest = { type: "image", imageDataUrl };
-      panel.hidden = false;
+      setWidgetVisible(panel, true);
       setStatus("Sending the cropped image for analysis…");
       sendImageRequest({ imageDataUrl }, nextRequestId);
     } catch (error) {
-      panel.hidden = false;
+      setWidgetVisible(panel, true);
       showError(nextRequestId, error instanceof Error ? error.message : "Could not crop the screenshot.");
     }
   }
@@ -1140,10 +1401,6 @@
     });
   }
 
-  function isValidRequestId(value) {
-    return typeof value === "string" && value.length > 0 && value.length <= 100;
-  }
-
   function setStatus(message) {
     statusText.textContent = message;
     status.hidden = false;
@@ -1196,11 +1453,29 @@
     }
   }
 
-  function positionPanel(x, y) {
-    const width = Math.min(390, window.innerWidth - 24);
-    const height = Math.min(540, window.innerHeight - 24);
-    const left = Math.max(12, Math.min(x, window.innerWidth - width - 12));
-    const top = Math.max(12, Math.min(y, window.innerHeight - height - 12));
+  function positionPanel(x, y, attachedRect = null) {
+    const bounds = panel.getBoundingClientRect();
+    const width = bounds.width || Math.min(390, window.innerWidth - 24);
+    const height = bounds.height || Math.min(540, window.innerHeight - 24);
+    const maxLeft = Math.max(12, window.innerWidth - width - 12);
+    const maxTop = Math.max(12, window.innerHeight - height - 12);
+    const horizontalAnchor = attachedRect ? attachedRect.left : x;
+    let verticalAnchor = y;
+
+    if (attachedRect) {
+      const below = attachedRect.bottom;
+      const above = attachedRect.top - height;
+      if (below <= maxTop) {
+        verticalAnchor = below;
+      } else if (above >= 12) {
+        verticalAnchor = above;
+      } else {
+        verticalAnchor = Math.min(below, maxTop);
+      }
+    }
+
+    const left = Math.max(12, Math.min(horizontalAnchor, maxLeft));
+    const top = Math.max(12, Math.min(verticalAnchor, maxTop));
     panel.style.left = `${left}px`;
     panel.style.top = `${top}px`;
   }
