@@ -159,6 +159,7 @@
   let contextHeaderPending = false;
   let contextSkipLineFeed = false;
   let activeUtterance = null;
+  let speechRunId = 0;
   let copyFeedbackTimer;
   let activeImage = null;
   let hideImageActionsTimer;
@@ -304,7 +305,7 @@
       return;
     }
     if (isLearningContext && isStreamComplete && hasSpeakableLearningLine()) {
-      speakText(getPlainResponseText(), getBrowserSpeechLanguage());
+      speakSegments(getReadAloudSegments());
     }
   });
 
@@ -632,56 +633,220 @@
     return "en-US";
   }
 
-  function speakText(text, language) {
+  function speakText(text, langCode) {
+    speakSegments([{ text, language: langCode }]);
+  }
+
+  function speakSegments(segments) {
     const Utterance = window.SpeechSynthesisUtterance;
-    if (!text || !window.speechSynthesis || typeof Utterance !== "function") {
+    const speakableSegments = segments
+      .map((segment) => ({
+        text: cleanSpeechText(segment.text),
+        language: segment.language || getBrowserSpeechLanguage()
+      }))
+      .filter((segment) => segment.text);
+    if (!speakableSegments.length || !window.speechSynthesis || typeof Utterance !== "function") {
       actionFeedback.textContent = "Read-aloud is not supported in this browser.";
       actionFeedback.dataset.error = "true";
       return;
     }
 
     stopSpeech();
+    const currentRunId = speechRunId;
+    speakButton.textContent = "⏹ Stop reading";
+    speakButton.setAttribute("aria-label", "Stop reading");
+    void playSpeechSegments(speakableSegments, currentRunId);
+  }
+
+  async function playSpeechSegments(segments, runId) {
     try {
-      const utterance = new Utterance(text);
-      utterance.lang = language;
+      for (const segment of segments) {
+        if (runId !== speechRunId) {
+          return;
+        }
+        await speakUtterance(segment.text, segment.language, runId);
+      }
+      if (runId === speechRunId) {
+        activeUtterance = null;
+        speakButton.textContent = "🔊 Read aloud";
+        speakButton.setAttribute("aria-label", "Read the explanation aloud");
+      }
+    } catch {
+      if (runId === speechRunId) {
+        activeUtterance = null;
+        speakButton.textContent = "🔊 Read aloud";
+        speakButton.setAttribute("aria-label", "Read the explanation aloud");
+        actionFeedback.textContent = "Could not read this text aloud.";
+        actionFeedback.dataset.error = "true";
+      }
+    }
+  }
+
+  async function speakUtterance(text, language, runId) {
+    const utterance = new window.SpeechSynthesisUtterance(text);
+    utterance.lang = language;
+    activeUtterance = utterance;
+
+    const voices = await getVoicesWhenReady();
+    if (runId !== speechRunId || activeUtterance !== utterance) {
+      return;
+    }
+    const voice = selectSpeechVoice(voices, language);
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    await new Promise((resolve, reject) => {
       utterance.onend = () => {
         if (activeUtterance === utterance) {
           activeUtterance = null;
-          speakButton.textContent = "🔊 Read aloud";
-          speakButton.setAttribute("aria-label", "Read the explanation aloud");
         }
+        resolve();
       };
-      utterance.onerror = () => {
-        if (activeUtterance === utterance) {
-          activeUtterance = null;
-          speakButton.textContent = "🔊 Read aloud";
-          speakButton.setAttribute("aria-label", "Read the explanation aloud");
-          actionFeedback.textContent = "Could not read this text aloud.";
-          actionFeedback.dataset.error = "true";
+      utterance.onerror = (event) => {
+        if (runId !== speechRunId || activeUtterance !== utterance) {
+          resolve();
+          return;
         }
+        activeUtterance = null;
+        reject(new Error(event.error || "Speech synthesis failed."));
       };
-      activeUtterance = utterance;
-      speakButton.textContent = "⏹ Stop reading";
-      speakButton.setAttribute("aria-label", "Stop reading");
       window.speechSynthesis.speak(utterance);
-    } catch {
-      activeUtterance = null;
-      speakButton.textContent = "🔊 Read aloud";
-      speakButton.setAttribute("aria-label", "Read the explanation aloud");
-      actionFeedback.textContent = "Could not read this text aloud.";
-      actionFeedback.dataset.error = "true";
+    });
+  }
+
+  function getVoicesWhenReady() {
+    const synthesis = window.speechSynthesis;
+    const voices = synthesis.getVoices();
+    if (voices.length) {
+      return Promise.resolve(voices);
     }
+
+    return new Promise((resolve) => {
+      let timeoutId;
+      const finish = (availableVoices) => {
+        synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+        window.clearTimeout(timeoutId);
+        resolve(availableVoices);
+      };
+      const handleVoicesChanged = () => {
+        const availableVoices = synthesis.getVoices();
+        if (availableVoices.length) {
+          finish(availableVoices);
+        }
+      };
+
+      synthesis.addEventListener("voiceschanged", handleVoicesChanged);
+      timeoutId = window.setTimeout(() => finish(synthesis.getVoices()), 2000);
+      handleVoicesChanged();
+    });
+  }
+
+  function selectSpeechVoice(voices, language) {
+    const normalizedLanguage = language.toLowerCase().replace(/_/g, "-");
+    const languageCode = normalizedLanguage.split("-")[0];
+    const languageVoices = voices.filter((voice) =>
+      typeof voice.lang === "string" &&
+      voice.lang.toLowerCase().replace(/_/g, "-").split("-")[0] === languageCode
+    );
+    const exactVoice = languageVoices.find((voice) =>
+      voice.lang.toLowerCase().replace(/_/g, "-") === normalizedLanguage
+    );
+    const namedVoice = (pattern) =>
+      languageVoices.find((voice) => pattern.test(voice.name));
+    const naturalVoice = namedVoice(/natural|neural|premium|enhanced|wavenet/i);
+
+    if (languageCode === "zh") {
+      const isTraditionalChinese = /(?:-tw|-hk|hant)/i.test(normalizedLanguage);
+      const regionalVoice = isTraditionalChinese
+        ? namedVoice(/google.*國語|國語.*google/i)
+        : namedVoice(/google.*普通话|普通话.*google/i);
+      return regionalVoice ||
+        naturalVoice ||
+        namedVoice(/google.*(?:普通话|國語)|(?:普通话|國語).*google/i) ||
+        exactVoice ||
+        languageVoices[0] ||
+        null;
+    }
+
+    if (languageCode === "en") {
+      const prefersBritish = /-(?:gb|uk)(?:-|$)/i.test(normalizedLanguage);
+      const googleVoice = prefersBritish
+        ? namedVoice(/google\s*uk english/i)
+        : namedVoice(/google\s*us english/i);
+      return googleVoice || naturalVoice || exactVoice || languageVoices[0] || null;
+    }
+
+    return naturalVoice || exactVoice || languageVoices[0] || null;
+  }
+
+  function cleanSpeechText(text) {
+    return typeof text === "string"
+      ? text.replace(/[\[\]\(\)\/]/g, " ").replace(/\s+/g, " ").trim()
+      : "";
   }
 
   function stopSpeech() {
     const synthesis = window.speechSynthesis;
     const wasSpeaking = activeUtterance !== null;
+    speechRunId += 1;
     activeUtterance = null;
     if (synthesis && wasSpeaking) {
       synthesis.cancel();
     }
     speakButton.textContent = "🔊 Read aloud";
     speakButton.setAttribute("aria-label", "Read the explanation aloud");
+  }
+
+  function getReadAloudSegments() {
+    const userLanguage = getBrowserSpeechLanguage();
+    const segments = [];
+    const blockTags = new Set(["DIV", "LI", "OL", "P", "PRE", "UL"]);
+
+    function appendText(text, language) {
+      if (!text) {
+        return;
+      }
+      const previous = segments[segments.length - 1];
+      if (previous?.language === language) {
+        previous.text += text;
+        return;
+      }
+      segments.push({ text, language });
+    }
+
+    function visit(node, language = userLanguage) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        appendText(node.nodeValue, language);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE || node.classList.contains("inline-speaker")) {
+        return;
+      }
+      if (node.tagName === "BR") {
+        appendText("\n", language);
+        return;
+      }
+
+      const isBlock = blockTags.has(node.tagName);
+      if (isBlock && segments.length) {
+        appendText("\n", language);
+      }
+      const childLanguage =
+        node.classList.contains("playable-line-foreign") ||
+        node.classList.contains("aie-foreign-example")
+        ? getExampleSpeechLanguage(node.textContent)
+        : language;
+      node.childNodes.forEach((child) => visit(child, childLanguage));
+      if (isBlock) {
+        appendText("\n", language);
+      }
+    }
+
+    response.childNodes.forEach((child) => visit(child));
+    return segments
+      .map((segment) => ({ ...segment, text: segment.text.trim() }))
+      .filter((segment) => segment.text);
   }
 
   function createInlineSpeaker(text) {

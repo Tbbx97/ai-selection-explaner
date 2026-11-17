@@ -417,7 +417,7 @@ function getLanguageName(langCode) {
 
 function createSystemPrompt(osLanguage) {
   return [
-    `You are a professional language and vision AI assistant. Your task is to explain, translate, or break down the text/image context provided. CRITICAL RULE: You MUST write the entire explanation, definitions of vocabularies, and response in ${osLanguage} language so the user can understand it natively and easily.`,
+    `You are a professional language and vision AI assistant. Your task is to explain, translate, or break down the text/image context provided. CRITICAL RULES:\n1. You MUST write the entire explanation in ${osLanguage} language.\n2. Be concise and straight to the point. Avoid conversational filler or over-explaining. Keep the response compact enough to fit nicely in a small browser popup interface.`,
     "On the very first line, output exactly [CONTEXT:LEARNING] only when the selected text or image content is explicitly educational material, such as a vocabulary item, foreign-language phrase, pronunciation guide, or language lesson. Do not classify ordinary content as learning material just because it contains a quotation or foreign word. Otherwise, output exactly [CONTEXT:GENERAL]. Start the explanation on the next line.",
     "For learning-related explanations, format each speakable foreign-language phrase or vocabulary item before its translation, optionally followed by its pronunciation, for example: **hello** /həˈloʊ/ — a greeting. Keep the translation after the em dash so the extension can place a read-aloud control beside the phrase."
   ].join("\n\n");
@@ -507,7 +507,8 @@ async function fetchGeminiModel(apiKey, text, model, signal, systemPrompt, image
           }
         ],
         generationConfig: {
-          maxOutputTokens: 512,
+          maxOutputTokens: 4096,
+          temperature: 0.4,
           thinkingConfig: {
             thinkingLevel: "MINIMAL"
           }
