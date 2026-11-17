@@ -160,6 +160,7 @@
   let contextSkipLineFeed = false;
   let activeUtterance = null;
   let speechRunId = 0;
+  let panelDrag = null;
   let copyFeedbackTimer;
   let activeImage = null;
   let hideImageActionsTimer;
@@ -176,8 +177,25 @@
 
   document.addEventListener("mousemove", (event) => {
     pointer = { x: event.clientX, y: event.clientY };
+    if (panelDrag) {
+      movePanelDrag(event);
+      return;
+    }
     updateSelectionVisibility(event);
   }, { passive: true });
+
+  header.addEventListener("mousedown", (event) => {
+    if (event.button !== 0 || event.composedPath().includes(closeButton)) {
+      return;
+    }
+    startPanelDrag(event);
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (panelDrag) {
+      endPanelDrag();
+    }
+  }, true);
 
   document.addEventListener("mouseup", (event) => {
     if (event.composedPath().includes(host)) {
@@ -641,7 +659,7 @@
     const Utterance = window.SpeechSynthesisUtterance;
     const speakableSegments = segments
       .map((segment) => ({
-        text: cleanSpeechText(segment.text),
+        text: cleanTextForSpeech(segment.text),
         language: segment.language || getBrowserSpeechLanguage()
       }))
       .filter((segment) => segment.text);
@@ -780,9 +798,9 @@
     return naturalVoice || exactVoice || languageVoices[0] || null;
   }
 
-  function cleanSpeechText(text) {
+  function cleanTextForSpeech(text) {
     return typeof text === "string"
-      ? text.replace(/[\[\]\(\)\/]/g, " ").replace(/\s+/g, " ").trim()
+      ? text.replace(/\/.*?\//g, "").replace(/\s+/g, " ").trim()
       : "";
   }
 
@@ -858,16 +876,31 @@
     speaker.textContent = "🔊";
     speaker.addEventListener("click", (event) => {
       event.stopPropagation();
-      speakText(text, getExampleSpeechLanguage(text));
+      speakPlayableLine(speaker, text);
     });
     speaker.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         event.stopPropagation();
-        speakText(text, getExampleSpeechLanguage(text));
+        speakPlayableLine(speaker, text);
       }
     });
     return speaker;
+  }
+
+  function speakPlayableLine(speaker, fallbackText) {
+    const line = speaker.closest(".playable-line");
+    const foreignPhrase = line?.querySelector(".playable-line-foreign")?.innerText || fallbackText;
+    let cleanLine = fallbackText;
+    if (line) {
+      const clone = line.cloneNode(true);
+      clone.querySelectorAll(".inline-speaker").forEach((control) => control.remove());
+      cleanLine = clone.innerText || clone.textContent || "";
+    }
+    const cleanedText = cleanTextForSpeech(cleanLine);
+    if (cleanedText) {
+      speakText(cleanedText, getExampleSpeechLanguage(foreignPhrase));
+    }
   }
 
   function getExampleSpeechLanguage(text) {
@@ -1505,6 +1538,39 @@
       setWidgetVisible(panel, true);
       showError(nextRequestId, error instanceof Error ? error.message : "Could not crop the screenshot.");
     }
+  }
+
+  function startPanelDrag(event) {
+    const bounds = panel.getBoundingClientRect();
+    panel.style.position = "fixed";
+    panelDrag = {
+      offsetX: event.clientX - bounds.left,
+      offsetY: event.clientY - bounds.top
+    };
+    panelAttachedToSelection = false;
+    panel.classList.add("is-dragging");
+    event.preventDefault();
+  }
+
+  function movePanelDrag(event) {
+    if (!panelDrag) {
+      return;
+    }
+
+    const bounds = panel.getBoundingClientRect();
+    const maxLeft = Math.max(0, window.innerWidth - bounds.width);
+    const maxTop = Math.max(0, window.innerHeight - bounds.height);
+    const left = Math.max(0, Math.min(event.clientX - panelDrag.offsetX, maxLeft));
+    const top = Math.max(0, Math.min(event.clientY - panelDrag.offsetY, maxTop));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  }
+
+  function endPanelDrag() {
+    const bounds = panel.getBoundingClientRect();
+    panelAnchor = { x: bounds.left, y: bounds.top };
+    panelDrag = null;
+    panel.classList.remove("is-dragging");
   }
 
   async function cropScreenshot(dataUrl, rectangle) {
