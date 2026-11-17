@@ -4,17 +4,17 @@
   "version": "1.0.0",
   "action": {
     "default_icon": {
-      "16": "AI-Explainer-Chrome-Icon.PNG",
-      "48": "AI-Explainer-Chrome-Icon.PNG",
-      "128": "AI-Explainer-Chrome-Icon.PNG"
+      "16": "AI-Explainer-Chrome-Icon.png",
+      "48": "AI-Explainer-Chrome-Icon.png",
+      "128": "AI-Explainer-Chrome-Icon.png"
     }
   },
   "icons": {
-    "16": "AI-Explainer-Chrome-Icon.PNG",
-    "48": "AI-Explainer-Chrome-Icon.PNG",
-    "128": "AI-Explainer-Chrome-Icon.PNG"
+    "16": "AI-Explainer-Chrome-Icon.png",
+    "48": "AI-Explainer-Chrome-Icon.png",
+    "128": "AI-Explainer-Chrome-Icon.png"
   },
-  "description": "Explain selected text with your own OpenAI or Gemini API key.",
+  "description": "Explain selected text, image, and screenshot with your own OpenAI or Gemini API key.",
   "minimum_chrome_version": "102",
   "permissions": [
     "storage",
