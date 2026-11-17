@@ -4,15 +4,15 @@
   "version": "1.0.0",
   "action": {
     "default_icon": {
-      "16": "AI-Explainer-Chrome-Icon.png",
-      "48": "AI-Explainer-Chrome-Icon.png",
-      "128": "AI-Explainer-Chrome-Icon.png"
+      "16": "ai-explainer-chrome-icon.png",
+      "48": "ai-explainer-chrome-icon.png",
+      "128": "ai-explainer-chrome-icon.png"
     }
   },
   "icons": {
-    "16": "AI-Explainer-Chrome-Icon.png",
-    "48": "AI-Explainer-Chrome-Icon.png",
-    "128": "AI-Explainer-Chrome-Icon.png"
+    "16": "ai-explainer-chrome-icon.png",
+    "48": "ai-explainer-chrome-icon.png",
+    "128": "ai-explainer-chrome-icon.png"
   },
   "description": "Explain selected text, image, and screenshot with your own OpenAI or Gemini API key.",
   "minimum_chrome_version": "102",
